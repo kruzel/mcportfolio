@@ -21,7 +21,11 @@ def solve_discrete_allocation_problem(problem: DiscreteAllocationProblem) -> dic
 
         da = DiscreteAllocation(weights, latest_prices, total_portfolio_value=portfolio_value)
         allocation, leftover = da.lp_portfolio()
+        clean_allocation = {ticker: int(shares) for ticker, shares in allocation.items()}
 
-        return {"status": "success", "data": {"allocation": allocation, "leftover": leftover}}
+        return {
+            "status": "success",
+            "data": {"allocation": clean_allocation, "leftover": float(leftover)},
+        }
     except Exception as e:
         return {"status": "error", "message": f"Error in Discrete Allocation: {e!s}"}

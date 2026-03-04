@@ -380,53 +380,55 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
 
         weight_bounds = (0, max_weight)
 
-        # EfficientFrontier setup
-        ef = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+        sectors = {
+            "tech": ["AAPL", "MSFT", "NVDA", "GOOGL", "META"],
+            "fin": ["JPM", "V", "BAC", "GS", "AXP"],
+            "health": ["JNJ", "UNH", "PFE", "MRK", "ABBV"],
+            "cons": ["MCD", "PG", "KO", "WMT", "SBUX"],
+            "energy": ["XOM", "CVX"],
+        }
 
-        # Apply sector constraints if specified
-        if sector_limits:
-            # Define sector groups
-            sectors = {
-                "tech": ["AAPL", "MSFT", "NVDA", "GOOGL", "META"],
-                "fin": ["JPM", "V", "BAC", "GS", "AXP"],
-                "health": ["JNJ", "UNH", "PFE", "MRK", "ABBV"],
-                "cons": ["MCD", "PG", "KO", "WMT", "SBUX"],
-                "energy": ["XOM", "CVX"],
-            }
-
-            # Add sector constraints
+        def _apply_sector_constraints(optimizer: EfficientFrontier) -> None:
+            if not sector_limits:
+                return
             for sector, limit in sector_limits.items():
                 if sector in sectors:
                     sector_tickers = sectors[sector]
-                    ef.add_sector_constraints({sector: sector_tickers}, {sector: limit})
+                    optimizer.add_sector_constraints({sector: sector_tickers}, {sector: limit})
 
         # 1. Minimum variance portfolio
-        # min_var_weights = ef.min_volatility()
-        min_var_perf = ef.portfolio_performance(verbose=False)
+        ef_min_var = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+        _apply_sector_constraints(ef_min_var)
+        ef_min_var.min_volatility()
+        min_var_perf = ef_min_var.portfolio_performance(verbose=False)
+        min_var_weights_clean = ef_min_var.clean_weights()
 
         # 2. Maximum return portfolio
         max_ret_idx = np.argmax(mean_returns.values)
         max_ret_weights = np.zeros(len(tickers))
         max_ret_weights[max_ret_idx] = 1.0
         max_ret_weights_dict = dict(zip(tickers, max_ret_weights, strict=True))
-        ef.set_weights(max_ret_weights_dict)
-        max_ret_perf = ef.portfolio_performance(verbose=False)
+        ef_max_ret = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+        _apply_sector_constraints(ef_max_ret)
+        ef_max_ret.set_weights(max_ret_weights_dict)
+        max_ret_perf = ef_max_ret.portfolio_performance(verbose=False)
 
         # 3. Max Sharpe ratio portfolio
-        rf = 0.04  # 4% annual risk-free rate
-        ef = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
-        if sector_limits:
-            for sector, limit in sector_limits.items():
-                if sector in sectors:
-                    sector_tickers = sectors[sector]
-                    ef.add_sector_constraints({sector: sector_tickers}, {sector: limit})
-        # sharpe_weights = ef.max_sharpe(risk_free_rate=rf)
-        sharpe_perf = ef.portfolio_performance(verbose=False, risk_free_rate=rf)
+        rf = 0.0
+        ef_sharpe = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+        _apply_sector_constraints(ef_sharpe)
+        try:
+            ef_sharpe.max_sharpe(risk_free_rate=rf)
+            sharpe_perf = ef_sharpe.portfolio_performance(verbose=False, risk_free_rate=rf)
+        except Exception:
+            ef_sharpe = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+            _apply_sector_constraints(ef_sharpe)
+            ef_sharpe.min_volatility()
+            sharpe_perf = ef_sharpe.portfolio_performance(verbose=False, risk_free_rate=0.0)
 
         # Clean weights
-        min_var_weights_clean = ef.clean_weights()
-        max_ret_weights_clean = ef._make_output_weights(max_ret_weights)
-        sharpe_weights_clean = ef.clean_weights()
+        max_ret_weights_clean = ef_max_ret._make_output_weights(max_ret_weights)
+        sharpe_weights_clean = ef_sharpe.clean_weights()
 
         return {
             "status": "success",

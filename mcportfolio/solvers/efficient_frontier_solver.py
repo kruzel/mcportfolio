@@ -20,10 +20,16 @@ def solve_efficient_frontier_problem(problem: EfficientFrontierProblem) -> dict[
         from pypfopt.efficient_frontier import EfficientFrontier
 
         ef = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=(problem.min_weight, problem.max_weight))
-        # Optimize for maximum Sharpe ratio
-        weights = ef.max_sharpe(risk_free_rate=problem.risk_free_rate)
+        # Optimize for maximum Sharpe ratio, with fallback if infeasible
+        try:
+            ef.max_sharpe(risk_free_rate=problem.risk_free_rate)
+            perf_risk_free_rate = problem.risk_free_rate
+        except Exception:
+            ef = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=(problem.min_weight, problem.max_weight))
+            ef.min_volatility()
+            perf_risk_free_rate = 0.0
         weights = ef.clean_weights()
-        expected_return, risk, sharpe = ef.portfolio_performance(verbose=False, risk_free_rate=problem.risk_free_rate)
+        expected_return, risk, sharpe = ef.portfolio_performance(verbose=False, risk_free_rate=perf_risk_free_rate)
 
         # Minimum variance portfolio
         ef_min_var = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=(problem.min_weight, problem.max_weight))

@@ -178,7 +178,7 @@ def simple_cvxpy_solver(
         return [TextContent(type="text", text=f"Error in simple_cvxpy_solver: {e!s}")]
 
 
-def retrieve_stock_data_tool(tickers: list[str], period: str = "1y") -> dict[str, Any]:
+def retrieve_stock_data_tool(tickers: list[str], period: str = "1y") -> list[TextContent]:
     """Retrieve historical stock data for the given tickers.
 
     This tool fetches historical price data for the specified stock tickers using Yahoo Finance.
@@ -196,7 +196,7 @@ def retrieve_stock_data_tool(tickers: list[str], period: str = "1y") -> dict[str
                 Supported periods: "1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"
 
     Returns:
-        Dictionary containing:
+        List of TextContent containing JSON with:
         - status: "success" or "error"
         - data: If successful, contains:
             - prices: Historical price data
@@ -209,15 +209,37 @@ def retrieve_stock_data_tool(tickers: list[str], period: str = "1y") -> dict[str
         - message: Error message if status is "error"
     """
     try:
-        return retrieve_stock_data(tickers=tickers, period=period)
+        result = retrieve_stock_data(tickers=tickers, period=period)
+        
+        # Convert pandas DataFrames and Series to JSON-serializable format
+        if result.get("status") == "success" and "data" in result:
+            data = result["data"]
+            # Convert DataFrames to dict format with string indices
+            if hasattr(data.get("prices"), "to_dict"):
+                # Reset index to use string dates instead of Timestamp objects
+                df = data["prices"].copy()
+                df.index = df.index.strftime("%Y-%m-%d")
+                data["prices"] = df.to_dict(orient="index")
+            if hasattr(data.get("returns"), "to_dict"):
+                df = data["returns"].copy()
+                df.index = df.index.strftime("%Y-%m-%d")
+                data["returns"] = df.to_dict(orient="index")
+            # Convert Series to dict
+            if hasattr(data.get("mean_returns"), "to_dict"):
+                data["mean_returns"] = data["mean_returns"].to_dict()
+            if hasattr(data.get("cov_matrix"), "to_dict"):
+                data["cov_matrix"] = data["cov_matrix"].to_dict()
+        
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
     except Exception as e:
         logger.error(f"Error in retrieve_stock_data_tool: {e!s}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        error_result = {"status": "error", "message": str(e)}
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
 
 
 def solve_portfolio_tool(
     description: str, tickers: list[str], constraints: list[str], objective: str
-) -> dict[str, Any]:
+) -> list[TextContent]:
     """Solve a portfolio optimization problem.
 
     This tool optimizes a portfolio of stocks based on historical data and specified constraints.
@@ -332,10 +354,11 @@ def solve_portfolio_tool(
             description=description, tickers=tickers, constraints=constraints, objective=objective
         )
         result = solve_portfolio_problem(problem)
-        return result
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
     except Exception as e:
         logger.error(f"Error in solve_portfolio_tool: {e!s}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        error_result = {"status": "error", "message": str(e)}
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
 
 
 def solve_black_litterman_tool(
@@ -347,7 +370,7 @@ def solve_black_litterman_tool(
     market_cap_weights: dict[str, float] | None = None,
     min_weight: float = 0.0,
     max_weight: float = 1.0,
-) -> dict[str, Any]:
+) -> list[TextContent]:
     """Solve a portfolio optimization problem using the Black-Litterman model.
 
     Args:
@@ -364,7 +387,7 @@ def solve_black_litterman_tool(
         max_weight: Maximum weight for any asset
 
     Returns:
-        Dictionary containing optimization results
+        List of TextContent containing JSON with optimization results
     """
     try:
         # Convert views to BlackLittermanView objects
@@ -384,9 +407,10 @@ def solve_black_litterman_tool(
 
         # Solve problem
         result = solve_black_litterman_problem(problem)
-        return result
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
     except Exception as e:
-        return {"status": "error", "message": f"Error in Black-Litterman optimization: {e!s}"}
+        error_result = {"status": "error", "message": f"Error in Black-Litterman optimization: {e!s}"}
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
 
 
 def solve_cla_tool(

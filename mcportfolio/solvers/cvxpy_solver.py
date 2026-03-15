@@ -47,6 +47,10 @@ def parse_expression(expr_str: str, variables: dict[str, cp.Variable], params: d
         **params,
         "cp": cp,
         "np": np,
+        "sum": cp.sum,
+        "sum_squares": cp.sum_squares,
+        "quad_form": cp.quad_form,
+        "norm": cp.norm,
     }
 
     # Evaluate the expression in the context of the local dictionary

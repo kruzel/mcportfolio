@@ -19,26 +19,22 @@ RUN sh /uv-installer.sh && rm /uv-installer.sh
 
 ENV PATH="/root/.local/bin/:$PATH"
 
-# Copy application code and dependencies
-COPY . .
+# Copy shared market data provider library first
+COPY libs/market_data_provider /app/libs/market_data_provider
 
-# Install dependencies and the package
-RUN uv pip install --system .
+# Copy application code and dependencies
+COPY tools/mcportfolio /app
+
+# Install shared library, then the package
+RUN uv pip install --system /app/libs/market_data_provider && uv pip install --system .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash mcportfolio
 USER mcportfolio
 
-# Expose HTTP port
-EXPOSE 8001
-
-# Add healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8001/health || exit 1
-
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Run the HTTP server
-CMD ["uvicorn", "mcportfolio.server.main:create_asgi_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
+# Run the MCP server in stdio mode (not HTTP)
+CMD ["python", "-m", "mcportfolio.server.main"]

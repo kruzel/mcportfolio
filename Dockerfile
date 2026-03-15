@@ -19,11 +19,14 @@ RUN sh /uv-installer.sh && rm /uv-installer.sh
 
 ENV PATH="/root/.local/bin/:$PATH"
 
-# Copy application code and dependencies
-COPY . .
+# Copy shared market data provider library first
+COPY libs/market_data_provider /app/libs/market_data_provider
 
-# Install dependencies and the package
-RUN uv pip install --system .
+# Copy application code and dependencies
+COPY tools/mcportfolio /app
+
+# Install shared library, then the package
+RUN uv pip install --system /app/libs/market_data_provider && uv pip install --system .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash mcportfolio

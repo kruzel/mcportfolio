@@ -14,7 +14,7 @@ pyportfolioopt==1.5.5
 pandas==2.2.0
 numpy==1.26.3
 scipy==1.12.0
-yfinance==0.2.36
+yfinance==1.2.0
 matplotlib==3.8.2
 
 # Additional dependencies for CI:
@@ -22,3 +22,5 @@ pytest>=7.0.0
 pytest-cov>=4.0.0
 ecos>=2.0.0
 pandas-datareader>=0.10.0
+redis>=4.0.0
+alpaca-py>=0.13.0

@@ -15,9 +15,8 @@ dependencies = [
     "pandas==2.2.0",
     "numpy==1.26.3",
     "scipy==1.12.0",
-    "yfinance==0.2.36",
     "matplotlib==3.8.2",
-    "pandas-datareader>=0.10.0"
+    "market-data-provider",
 ]
 
 [project.optional-dependencies]

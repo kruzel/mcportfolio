@@ -1,29 +1,17 @@
-# Modified by Edward Brandler, based on original files from PyPortfolioOpt and USolver
+﻿# Modified by Edward Brandler, based on original files from PyPortfolioOpt and USolver
 from typing import Any
 from datetime import datetime, timedelta
 
-# import json
+import os
+import asyncio
 import pandas as pd
-import yfinance as yf
 from pypfopt.efficient_frontier.efficient_frontier import EfficientFrontier
 
-# from pypfopt.expected_returns import mean_historical_return
-# from pypfopt.risk_models import CovarianceShrinkage
-# import cvxpy as cp
 import numpy as np
 import logging
 import sys
 
 from mcportfolio.models.portfolio_base_models import PortfolioProblem
-
-# Alternative data sources
-try:
-    import pandas_datareader as pdr
-
-    PANDAS_DATAREADER_AVAILABLE = True
-except ImportError:
-    PANDAS_DATAREADER_AVAILABLE = False
-    pdr = None
 
 # Configure logging to stderr
 logging.basicConfig(
@@ -34,302 +22,87 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Shared market data provider (lazy init) ───────────────────────────────────
+
+_unified_provider: Any | None = None
+
+
+def _get_unified_provider():
+    """Lazily initialise the shared UnifiedMarketData instance."""
+    global _unified_provider
+    if _unified_provider is not None:
+        return _unified_provider
+
+    from market_data_provider import MarketDataConfig, UnifiedMarketData
+
+    config = MarketDataConfig(
+        alpaca_api_key=os.environ.get("ALPACA_API_KEY", ""),
+        alpaca_api_secret=os.environ.get("ALPACA_SECRET_KEY", ""),
+        alpaca_market_data_key=os.environ.get("ALPACA_MARKET_DATA_KEY", ""),
+        alpaca_market_data_secret=os.environ.get("ALPACA_MARKET_DATA_SECRET", ""),
+        itick_api_token=os.environ.get("ITICK_API_TOKEN", ""),
+        redis_url=os.environ.get("REDIS_URL", ""),
+    )
+    _unified_provider = UnifiedMarketData(config)
+    return _unified_provider
+
+
 def extract_tickers(task: str) -> list[str]:
-    """Extract stock tickers from a task description.
-
-    Args:
-        task: The task description containing ticker symbols
-
-    Returns:
-        List of extracted ticker symbols
-    """
+    """Extract stock tickers from a task description."""
     words = task.upper().split()
     return [word.strip(",") for word in words if word.isalpha() and 2 <= len(word) <= 5]
 
 
-def _get_data_from_stooq(tickers: list[str], period: str = "1y") -> tuple[pd.DataFrame | None, str]:
-    """Fetch data from Stooq via pandas-datareader."""
-    if not PANDAS_DATAREADER_AVAILABLE:
-        return None, "pandas-datareader not available"
-
-    try:
-        logger.info("Trying Stooq data source...")
-
-        # Convert period to start/end dates
-        end_date = datetime.now()
-        period_days = {
-            "1d": 1,
-            "5d": 5,
-            "1mo": 30,
-            "3mo": 90,
-            "6mo": 180,
-            "1y": 365,
-            "2y": 730,
-            "5y": 1825,
-            "10y": 3650,
-            "ytd": 200,
-            "max": 3650,
-        }
-        days = period_days.get(period, 365)
-        start_date = end_date - timedelta(days=days)
-
-        # Fetch data for each ticker
-        data_frames = []
-        for ticker in tickers:
-            try:
-                # Stooq uses different format - add .US suffix for US stocks
-                stooq_ticker = f"{ticker}.US"
-                ticker_data = pdr.get_data_stooq(stooq_ticker, start=start_date, end=end_date)
-                if not ticker_data.empty:
-                    # Rename columns to match yfinance format
-                    ticker_data.columns = [f"{col}_{ticker}" for col in ticker_data.columns]
-                    data_frames.append(ticker_data)
-                else:
-                    logger.warning(f"No data from Stooq for {ticker}")
-            except Exception as e:
-                logger.warning(f"Stooq failed for {ticker}: {e}")
-                continue
-
-        if data_frames:
-            # Combine all ticker data
-            combined_data = pd.concat(data_frames, axis=1)
-
-            # Restructure to match yfinance multi-index format
-            price_data = {}
-            for col in ["Open", "High", "Low", "Close"]:
-                price_data[col] = pd.DataFrame(
-                    {
-                        ticker: combined_data[f"{col}_{ticker}"]
-                        for ticker in tickers
-                        if f"{col}_{ticker}" in combined_data.columns
-                    }
-                )
-
-            # Create MultiIndex columns like yfinance
-            if price_data:
-                result = pd.concat(price_data, axis=1)
-                logger.info(f"Stooq data retrieved - shape: {result.shape}")
-                return result, ""
-
-        return None, "No data retrieved from Stooq"
-
-    except Exception as e:
-        logger.warning(f"Stooq data source failed: {e}")
-        return None, f"Stooq error: {e}"
-
-
-def _get_data_from_fred(tickers: list[str], period: str = "1y") -> tuple[pd.DataFrame | None, str]:
-    """Fetch data from FRED (Federal Reserve Economic Data) - mainly for economic indicators."""
-    if not PANDAS_DATAREADER_AVAILABLE:
-        return None, "pandas-datareader not available"
-
-    try:
-        logger.info("Trying FRED data source...")
-
-        # Convert period to start/end dates
-        end_date = datetime.now()
-        period_days = {
-            "1d": 1,
-            "5d": 5,
-            "1mo": 30,
-            "3mo": 90,
-            "6mo": 180,
-            "1y": 365,
-            "2y": 730,
-            "5y": 1825,
-            "10y": 3650,
-            "ytd": 200,
-            "max": 3650,
-        }
-        days = period_days.get(period, 365)
-        start_date = end_date - timedelta(days=days)
-
-        # FRED is mainly for economic data, not individual stocks
-        # This is more useful for market indices or economic indicators
-        # Common FRED series: 'SP500', 'DEXUSEU', 'DGS10', etc.
-        fred_tickers = []
-        for ticker in tickers:
-            # Map common tickers to FRED series
-            fred_mapping = {
-                "SPY": "SP500",  # S&P 500
-                "QQQ": "NASDAQCOM",  # NASDAQ
-                # Add more mappings as needed
-            }
-            if ticker in fred_mapping:
-                fred_tickers.append(fred_mapping[ticker])
-
-        if fred_tickers:
-            data = pdr.get_data_fred(fred_tickers, start=start_date, end=end_date)
-            if data is not None and not data.empty:
-                logger.info(f"FRED data retrieved - shape: {data.shape}")
-                return data, ""
-
-        return None, "No FRED data available for these tickers"
-
-    except Exception as e:
-        logger.warning(f"FRED data source failed: {e}")
-        return None, f"FRED error: {e}"
-
-
 def retrieve_stock_data(tickers: list[str], period: str = "1y") -> dict[str, Any]:
-    """
-    Retrieve historical stock data for the given tickers with robust error handling.
+    """Retrieve historical stock data via the shared market_data_provider library.
 
-    Args:
-        tickers: List of stock tickers
-        period: Time period to retrieve (e.g., "1y" for 1 year)
+    Delegates to UnifiedMarketData.fetch_stock_data() which handles the full
+    Alpaca -> yfinance -> iTick -> Stooq cascade with Redis caching and FX->USD
+    conversion for international tickers.
 
-    Returns:
-        Dictionary containing the processed data or error message
+    Returns the same dict format as before::
+
+        {"status": "success", "data": {
+            "prices": DataFrame, "returns": DataFrame,
+            "mean_returns": Series (x252), "cov_matrix": DataFrame,
+            "start_date": str, "end_date": str, "num_days": int}}
     """
     try:
-        logger.info(f"Retrieving data for tickers: {tickers}")
+        logger.info("Retrieving data for tickers: %s (period=%s)", tickers, period)
 
-        # Try multiple approaches for data retrieval
-        data = None
-        error_messages = []
+        provider = _get_unified_provider()
 
-        # Approach 1: Standard yfinance download
+        # Run async fetch in sync context (MCP server tools are sync)
         try:
-            data = yf.download(tickers, period=period, progress=False, threads=False)
-            logger.info(f"Standard download - Raw data shape: {data.shape}")
-        except Exception as e:
-            error_messages.append(f"Standard download failed: {e}")
-            logger.warning(f"Standard download failed: {e}")
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
 
-        # Approach 2: Individual ticker download if standard fails
-        if data is None or data.empty:
-            try:
-                logger.info("Trying individual ticker downloads...")
-                individual_data = {}
-                for ticker in tickers:
-                    ticker_obj = yf.Ticker(ticker)
-                    ticker_data = ticker_obj.history(period=period)
-                    if not ticker_data.empty:
-                        individual_data[ticker] = ticker_data
-
-                if individual_data:
-                    # Combine individual ticker data
-                    combined_data = {}
-                    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
-                        combined_data[col] = pd.DataFrame(
-                            {ticker: individual_data[ticker][col] for ticker in individual_data.keys()}
-                        )
-
-                    # Create MultiIndex columns like yf.download
-                    data = pd.concat(combined_data, axis=1)
-                    logger.info(f"Individual download - Combined data shape: {data.shape}")
-                else:
-                    error_messages.append("Individual ticker downloads returned no data")
-            except Exception as e:
-                error_messages.append(f"Individual download failed: {e}")
-                logger.warning(f"Individual download failed: {e}")
-
-        # Approach 3: Try Stooq via pandas-datareader
-        if data is None or data.empty:
-            stooq_data, stooq_error = _get_data_from_stooq(tickers, period)
-            if stooq_data is not None and not stooq_data.empty:
-                data = stooq_data
-                logger.info(f"Stooq data retrieved - shape: {data.shape}")
-            else:
-                error_messages.append(f"Stooq failed: {stooq_error}")
-
-        # Approach 4: Try FRED for market indices
-        if data is None or data.empty:
-            fred_data, fred_error = _get_data_from_fred(tickers, period)
-            if fred_data is not None and not fred_data.empty:
-                data = fred_data
-                logger.info(f"FRED data retrieved - shape: {data.shape}")
-            else:
-                error_messages.append(f"FRED failed: {fred_error}")
-
-        # If all real data sources fail, return clear error
-        if data is None or data.empty:
-            error_summary = "; ".join(error_messages) if error_messages else "Unknown data retrieval failure"
-            return {
-                "status": "error",
-                "message": f"Unable to retrieve real market data for tickers {tickers}. "
-                f"All data sources failed: {error_summary}. "
-                f"Please check ticker symbols and try again later, or verify internet connectivity.",
-            }
-
-        logger.info(f"Final data shape: {data.shape}")
-        logger.info(f"Final data columns: {data.columns.tolist()}")
-
-        # Handle empty data
-        if data.empty:
-            return {
-                "status": "error",
-                "message": f"No data retrieved for tickers: {tickers}. Errors: {'; '.join(error_messages)}",
-            }
-
-        # Handle multi-index columns
-        if isinstance(data.columns, pd.MultiIndex):
-            # Try to get prices in order of preference
-            price_cols = ["Adj Close", "Close", "Open", "High", "Low"]
-            prices = None
-            for col in price_cols:
-                if any((col, ticker) in data.columns for ticker in tickers):
-                    prices = data[col]
-                    logger.info(f"Using {col} prices")
-                    break
-            if prices is None:
-                return {
-                    "status": "error",
-                    "message": f"No price data available. Available columns: {data.columns.tolist()}",
-                }
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                stock_data = pool.submit(
+                    asyncio.run, provider.fetch_stock_data(tickers, period)
+                ).result()
         else:
-            # Single ticker case
-            price_cols = ["Adj Close", "Close", "Open", "High", "Low"]
-            prices = None
-            for col in price_cols:
-                if col in data.columns:
-                    prices = pd.DataFrame(data[col])
-                    prices.columns = tickers
-                    logger.info(f"Using {col} prices")
-                    break
-            if prices is None:
-                return {
-                    "status": "error",
-                    "message": f"No price data available. Available columns: {data.columns.tolist()}",
-                }
+            stock_data = asyncio.run(provider.fetch_stock_data(tickers, period))
 
-        logger.info(f"Prices DataFrame shape: {prices.shape}")
-        logger.info(f"Prices DataFrame columns: {prices.columns.tolist()}")
+        prices = stock_data.prices
+        returns = stock_data.returns
+        mean_returns = stock_data.mean_returns
+        cov_matrix = stock_data.cov_matrix
 
-        # Handle empty prices DataFrame
-        if prices.empty:
-            return {
-                "status": "error",
-                "message": f"Empty price data for tickers: {tickers}",
-            }
-
-        # Calculate returns with additional safety checks
-        returns = prices.pct_change().dropna()
-        logger.info(f"Returns DataFrame shape: {returns.shape}")
-        logger.info(f"Returns DataFrame columns: {returns.columns.tolist()}")
-
-        # Verify we have enough data points
-        if len(returns) < 2:
+        if prices.empty or len(returns) < 2:
             return {
                 "status": "error",
                 "message": f"Insufficient data points for tickers: {tickers}. "
                 f"Need at least 2 days of data, got {len(returns)}.",
             }
 
-        # Verify we have data for all tickers
-        missing_tickers = [ticker for ticker in tickers if ticker not in returns.columns]
+        missing_tickers = [t for t in tickers if t not in returns.columns]
         if missing_tickers:
             return {"status": "error", "message": f"No data available for tickers: {missing_tickers}"}
 
-        # Calculate basic statistics
-        mean_returns = returns.mean()
-        cov_matrix = returns.cov()
-
-        logger.info(f"Mean returns:\n{mean_returns}")
-        logger.info(f"Covariance matrix shape: {cov_matrix.shape}")
-
-        # Verify covariance matrix is valid
         if cov_matrix.isnull().any().any():
             return {"status": "error", "message": "Invalid covariance matrix: contains NaN values"}
 
@@ -341,18 +114,17 @@ def retrieve_stock_data(tickers: list[str], period: str = "1y") -> dict[str, Any
             "data": {
                 "prices": prices,
                 "returns": returns,
-                "mean_returns": mean_returns * 252,
+                "mean_returns": mean_returns,
                 "cov_matrix": cov_matrix,
-                "start_date": returns.index[0].strftime("%Y-%m-%d"),
-                "end_date": returns.index[-1].strftime("%Y-%m-%d"),
-                "num_days": len(returns),
+                "start_date": stock_data.start_date,
+                "end_date": stock_data.end_date,
+                "num_days": stock_data.num_days,
             },
         }
 
     except Exception as e:
-        logger.error(f"Error in retrieve_stock_data: {e!s}", exc_info=True)
+        logger.error("Error in retrieve_stock_data: %s", e, exc_info=True)
         return {"status": "error", "message": f"Error retrieving stock data: {e!s}"}
-
 
 def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
     """Solve a portfolio optimization problem."""

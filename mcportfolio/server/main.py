@@ -615,13 +615,8 @@ def solve_discrete_allocation_tool(
         ]
 
 
-# Configure MCP server network binding for HTTP transports.
-# Defaults align with docker-compose settings used by backend service discovery.
-_MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
-_MCP_PORT = int(os.getenv("MCP_PORT", "8001"))
-
 # At the module level, after all function definitions, update the app initialization:
-app = FastMCP(name="mcportfolio", host=_MCP_HOST, port=_MCP_PORT)
+app = FastMCP(name="mcportfolio")
 app.tool("solve_cvxpy_problem")(solve_cvxpy_problem_tool)
 app.tool("simple_cvxpy_solver")(simple_cvxpy_solver)
 app.tool("retrieve_stock_data")(retrieve_stock_data_tool)
@@ -671,9 +666,11 @@ def main() -> None:
         transport = "stdio"
     
     if transport == "streamable-http":
-        # For HTTP/streamable-http transport, use FastMCP's built-in server
-        logger.info(f"Starting mcportfolio MCP server on {_MCP_HOST}:{_MCP_PORT} (transport={transport})")
-    
+        # For HTTP/streamable-http transport, FastMCP reads bind values from
+        # FASTMCP_HOST / FASTMCP_PORT environment variables.
+        host = os.getenv("FASTMCP_HOST", "127.0.0.1")
+        port = os.getenv("FASTMCP_PORT", "8000")
+        logger.info(f"Starting mcportfolio MCP server on {host}:{port} (transport={transport})")
     app.run(transport=transport)
 
 

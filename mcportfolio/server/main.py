@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import logging
+import os
 import sys
 from typing import Any
 from starlette.applications import Starlette
@@ -614,8 +615,13 @@ def solve_discrete_allocation_tool(
         ]
 
 
+# Configure MCP server network binding for HTTP transports.
+# Defaults align with docker-compose settings used by backend service discovery.
+_MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
+_MCP_PORT = int(os.getenv("MCP_PORT", "8001"))
+
 # At the module level, after all function definitions, update the app initialization:
-app = FastMCP(name="mcportfolio")
+app = FastMCP(name="mcportfolio", host=_MCP_HOST, port=_MCP_PORT)
 app.tool("solve_cvxpy_problem")(solve_cvxpy_problem_tool)
 app.tool("simple_cvxpy_solver")(simple_cvxpy_solver)
 app.tool("retrieve_stock_data")(retrieve_stock_data_tool)
@@ -657,10 +663,23 @@ def create_asgi_app() -> Starlette:
 
 def main() -> None:
     """Main entry point for the MCP server"""
-    app.run(transport="stdio")
+    # Support both stdio (default) and HTTP transports
+    transport = os.getenv("MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
+    
+    if transport not in {"stdio", "streamable-http", "sse"}:
+        logger.warning(f"Invalid MCP_TRANSPORT={transport}, falling back to stdio")
+        transport = "stdio"
+    
+    if transport == "streamable-http":
+        # For HTTP/streamable-http transport, use FastMCP's built-in server
+        logger.info(f"Starting mcportfolio MCP server on {_MCP_HOST}:{_MCP_PORT} (transport={transport})")
+    
+    app.run(transport=transport)
 
 
 if __name__ == "__main__":
-    # For Claude Desktop and MCP clients, use stdio transport by default
-    # For HTTP server, use: uvicorn mcportfolio.server.main:create_asgi_app --factory --host 0.0.0.0 --port 8001
+    # Entry point: detect transport from environment variable
+    # STDIO (default) - for Claude Desktop, local development
+    # STREAMABLE_HTTP - for Docker containers with network transport
+    # Example: MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8001 python -m mcportfolio.server.main
     main()

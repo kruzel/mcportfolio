@@ -35,11 +35,9 @@ def _get_unified_provider():
 
     from market_data_provider import MarketDataConfig, UnifiedMarketData
 
+    # Mirror guarded_llm's own provider construction (see analytics_server.py): the current
+    # market_data_provider API is iTick/FRED-based and no longer accepts the legacy Alpaca kwargs.
     config = MarketDataConfig(
-        alpaca_api_key=os.environ.get("ALPACA_API_KEY", ""),
-        alpaca_api_secret=os.environ.get("ALPACA_SECRET_KEY", ""),
-        alpaca_market_data_key=os.environ.get("ALPACA_MARKET_DATA_KEY", ""),
-        alpaca_market_data_secret=os.environ.get("ALPACA_MARKET_DATA_SECRET", ""),
         itick_api_token=os.environ.get("ITICK_API_TOKEN", ""),
         redis_url=os.environ.get("REDIS_URL", ""),
     )

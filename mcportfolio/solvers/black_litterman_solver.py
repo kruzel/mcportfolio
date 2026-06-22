@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from typing import Any
 from ..models.portfolio_black_litterman_models import BlackLittermanProblem, BlackLittermanView
-from .portfolio_solver import retrieve_stock_data
+from .portfolio_solver import retrieve_stock_data, cov_from_nested
 
 
 def market_implied_prior_returns(
@@ -142,15 +142,17 @@ def calculate_black_litterman_returns(
 def solve_black_litterman_problem(problem: BlackLittermanProblem) -> dict[str, Any]:
     """Solve a Black-Litterman portfolio optimization problem."""
     try:
-        # Get market data
-        data = retrieve_stock_data(tickers=problem.tickers, period="2y")
-        if data.get("status") == "error":
-            return data
-
-        # Variables from original PyPortfolioOpt implementation, currently unused
-        # prices = data['data']['prices']
-        # mean_returns = data['data']['mean_returns']
-        cov_matrix = data["data"]["cov_matrix"]
+        # Covariance: prefer the caller-supplied matrix (sliced from the daily research report)
+        # and only fetch live when it is absent. The caller owns completeness — cov_from_nested
+        # raises if the override does not cover every ticker. BL derives its own expected returns
+        # (the posterior), so it needs only the covariance, never mean_returns.
+        if problem.cov_matrix:
+            cov_matrix = cov_from_nested(problem.cov_matrix, problem.tickers)
+        else:
+            data = retrieve_stock_data(tickers=problem.tickers, period="2y")
+            if data.get("status") == "error":
+                return data
+            cov_matrix = data["data"]["cov_matrix"]
 
         # Use equal weights if market cap weights not provided
         if not problem.market_cap_weights:

@@ -51,6 +51,63 @@ def extract_tickers(task: str) -> list[str]:
     return [word.strip(",") for word in words if word.isalpha() and 2 <= len(word) <= 5]
 
 
+def cov_from_nested(cov: dict[str, dict[str, float]], tickers: list[str]) -> pd.DataFrame:
+    """Build an ordered (tickers x tickers) covariance DataFrame from a caller-supplied
+    nested dict, slicing to exactly ``tickers`` in order. The dict may cover a SUPERSET
+    (e.g. the whole research report) — we select the relevant principal sub-matrix.
+
+    Raises ``KeyError`` if any ticker (row or column) is missing — the caller's contract is
+    to supply a COMPLETE matrix for the universe, so an incomplete one is a hard error, not a
+    silent live-fetch fallback (that decision belongs to the caller, not the solver).
+    """
+    missing = [t for t in tickers if t not in cov or any(c not in cov.get(t, {}) for c in tickers)]
+    if missing:
+        raise KeyError(f"covariance override missing entries for: {missing}")
+    df = pd.DataFrame(
+        [[float(cov[r][c]) for c in tickers] for r in tickers],
+        index=tickers, columns=tickers, dtype=float,
+    )
+    # Symmetrise to wash out any rounding asymmetry from serialisation.
+    return (df + df.T) / 2.0
+
+
+def resolve_optimizer_inputs(problem: PortfolioProblem):
+    """Return ``(mean_returns: pd.Series|None, cov_matrix: pd.DataFrame)`` for the problem's
+    tickers, preferring caller-supplied overrides and falling back to a live fetch.
+
+    - ``problem.cov_matrix`` set  → slice it to ``problem.tickers`` (no fetch).
+    - ``problem.mean_returns`` set → ordered Series over ``problem.tickers`` (no fetch).
+    - either missing               → live 2y fetch supplies the missing one.
+
+    The caller owns completeness: if it passes an override it must cover the full universe
+    (``cov_from_nested`` raises otherwise). Mixing is allowed (e.g. report cov + live means),
+    but in practice the BL/MVO callers pass both or neither.
+    """
+    tickers = problem.tickers or []
+    have_cov = bool(problem.cov_matrix)
+    have_mu = bool(problem.mean_returns)
+
+    cov_df: pd.DataFrame | None = None
+    mu_series: pd.Series | None = None
+
+    if have_cov:
+        cov_df = cov_from_nested(problem.cov_matrix, tickers)
+    if have_mu:
+        mu_series = pd.Series({t: float(problem.mean_returns[t]) for t in tickers}, dtype=float)
+
+    if cov_df is None or mu_series is None:
+        # Live-fetch whatever the caller did not supply.
+        data = retrieve_stock_data(tickers=tickers, period="2y")
+        if data.get("status") == "error":
+            raise ValueError(data.get("message") or "market data fetch failed")
+        if cov_df is None:
+            cov_df = data["data"]["cov_matrix"].loc[tickers, tickers]
+        if mu_series is None:
+            mu_series = data["data"]["mean_returns"].reindex(tickers)
+
+    return mu_series, cov_df
+
+
 def retrieve_stock_data(tickers: list[str], period: str = "1y") -> dict[str, Any]:
     """Retrieve historical stock data via the shared market_data_provider library.
 
@@ -130,12 +187,12 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
         tickers = problem.tickers
         if not tickers:
             return {"status": "error", "message": "No tickers provided in problem description"}
-        data = retrieve_stock_data(tickers=tickers, period="2y")
-        if data.get("status") == "error":
-            return data
-        # prices = data['data']['prices']
-        mean_returns = data["data"]["mean_returns"]
-        cov_matrix = data["data"]["cov_matrix"]
+        # Prefer caller-supplied returns + covariance (sliced from the daily research report);
+        # fall back to a live 2y fetch for anything not supplied. See resolve_optimizer_inputs.
+        try:
+            mean_returns, cov_matrix = resolve_optimizer_inputs(problem)
+        except (ValueError, KeyError) as e:
+            return {"status": "error", "message": str(e)}
 
         # Parse constraints
         max_weight = 0.5
@@ -147,6 +204,22 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
                 elif constraint.startswith("sector_"):
                     sector, limit = constraint.split()
                     sector_limits[sector] = float(limit)
+
+        # Feasibility floor on the per-name cap: with n assets each capped at max_weight, the
+        # achievable total is max_weight * n, so a cap below 1/n makes the long-only,
+        # fully-invested problem infeasible (min_volatility would raise "infeasible_inaccurate").
+        # Raise the cap to just above 1/n (15% headroom keeps OSQP off the degenerate boundary,
+        # where even an exact max_weight*n == 1.0 reports infeasible_inaccurate). Never lowers a
+        # caller's cap — only loosens one that is mathematically impossible for this universe.
+        n_assets = len(tickers)
+        if n_assets > 0:
+            min_feasible = min(1.0, (1.0 / n_assets) * 1.15)
+            if max_weight < min_feasible:
+                logger.info(
+                    "max_weight %.3f infeasible for %d assets (need >= %.3f); raising to keep "
+                    "the optimisation feasible", max_weight, n_assets, min_feasible,
+                )
+                max_weight = min_feasible
 
         weight_bounds = (0, max_weight)
 
@@ -166,12 +239,24 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
                     sector_tickers = sectors[sector]
                     optimizer.add_sector_constraints({sector: sector_tickers}, {sector: limit})
 
-        # 1. Minimum variance portfolio
-        ef_min_var = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
-        _apply_sector_constraints(ef_min_var)
-        ef_min_var.min_volatility()
-        min_var_perf = ef_min_var.portfolio_performance(verbose=False)
-        min_var_weights_clean = ef_min_var.clean_weights()
+        # 1. Minimum variance portfolio. This is an AUXILIARY result (the primary plan is the
+        # max-Sharpe portfolio below); a numerically-degenerate solve here must not abort the
+        # whole optimisation. On failure, fall back to an equal-weight min-var stand-in so the
+        # caller still gets a usable plan instead of a hard error.
+        min_var_weights_clean: dict[str, float]
+        try:
+            ef_min_var = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+            _apply_sector_constraints(ef_min_var)
+            ef_min_var.min_volatility()
+            min_var_perf = ef_min_var.portfolio_performance(verbose=False)
+            min_var_weights_clean = ef_min_var.clean_weights()
+        except Exception as e:
+            logger.warning("min_volatility failed (%s); using equal-weight min-var fallback", e)
+            ew = {t: 1.0 / n_assets for t in tickers}
+            ef_min_var = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=(0, 1.0))
+            ef_min_var.set_weights(ew)
+            min_var_perf = ef_min_var.portfolio_performance(verbose=False)
+            min_var_weights_clean = ef_min_var.clean_weights()
 
         # 2. Maximum return portfolio
         max_ret_idx = np.argmax(mean_returns.values)

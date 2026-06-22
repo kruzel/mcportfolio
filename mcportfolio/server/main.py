@@ -239,7 +239,9 @@ def retrieve_stock_data_tool(tickers: list[str], period: str = "1y") -> list[Tex
 
 
 def solve_portfolio_tool(
-    description: str, tickers: list[str], constraints: list[str], objective: str
+    description: str, tickers: list[str], constraints: list[str], objective: str,
+    cov_matrix: dict[str, dict[str, float]] | None = None,
+    mean_returns: dict[str, float] | None = None,
 ) -> list[TextContent]:
     """Solve a portfolio optimization problem.
 
@@ -337,6 +339,12 @@ def solve_portfolio_tool(
                   - "maximize_quadratic_utility": Maximize quadratic utility
                   - "efficient_risk": Efficient risk optimization
                   - "efficient_return": Efficient return optimization
+        cov_matrix: Optional pre-assembled annualised covariance (row-major nested dict
+                  {row: {col: cov}}) covering every ticker. When provided the solver uses it
+                  instead of fetching live data.
+        mean_returns: Optional annualised expected return per ticker ({ticker: mu}) covering
+                  every ticker. When provided the solver uses these instead of live data.
+                  Supply both cov_matrix and mean_returns together to fully avoid a live fetch.
 
     Returns:
         Dictionary containing:
@@ -352,7 +360,8 @@ def solve_portfolio_tool(
     """
     try:
         problem = PortfolioProblem(
-            description=description, tickers=tickers, constraints=constraints, objective=objective
+            description=description, tickers=tickers, constraints=constraints, objective=objective,
+            cov_matrix=cov_matrix, mean_returns=mean_returns,
         )
         result = solve_portfolio_problem(problem)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -371,6 +380,7 @@ def solve_black_litterman_tool(
     market_cap_weights: dict[str, float] | None = None,
     min_weight: float = 0.0,
     max_weight: float = 1.0,
+    cov_matrix: dict[str, dict[str, float]] | None = None,
 ) -> list[TextContent]:
     """Solve a portfolio optimization problem using the Black-Litterman model.
 
@@ -386,6 +396,9 @@ def solve_black_litterman_tool(
         market_cap_weights: Market capitalization weights
         min_weight: Minimum weight for any asset
         max_weight: Maximum weight for any asset
+        cov_matrix: Optional pre-assembled annualised covariance (row-major nested dict
+            {row: {col: cov}}) covering every ticker. When provided the solver uses it
+            instead of fetching live data. Normally supplied verbatim by build_bl_inputs.
 
     Returns:
         List of TextContent containing JSON with optimization results
@@ -404,6 +417,7 @@ def solve_black_litterman_tool(
             market_cap_weights=market_cap_weights,
             min_weight=min_weight,
             max_weight=max_weight,
+            cov_matrix=cov_matrix,
         )
 
         # Solve problem

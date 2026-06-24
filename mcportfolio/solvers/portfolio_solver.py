@@ -196,11 +196,14 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
 
         # Parse constraints
         max_weight = 0.5
+        max_volatility: float | None = None
         sector_limits = {}
         if problem.constraints:
             for constraint in problem.constraints:
                 if constraint.startswith("max_weight"):
                     max_weight = float(constraint.split()[1])
+                elif constraint.startswith("max_volatility"):
+                    max_volatility = float(constraint.split()[1])
                 elif constraint.startswith("sector_"):
                     sector, limit = constraint.split()
                     sector_limits[sector] = float(limit)
@@ -267,8 +270,69 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
         _apply_sector_constraints(ef_max_ret)
         ef_max_ret.set_weights(max_ret_weights_dict)
         max_ret_perf = ef_max_ret.portfolio_performance(verbose=False)
+        max_ret_weights_clean = ef_max_ret._make_output_weights(max_ret_weights)
 
-        # 3. Max Sharpe ratio portfolio
+        # 3a. Volatility-capped plan (max_volatility constraint). When the caller asks the plan to
+        # stay under a volatility ceiling (an in-band rebuild for a conservative risk profile), the
+        # objective is "maximise return SUBJECT TO vol <= cap" — efficient_risk, not max_sharpe.
+        # PyPortfolioOpt's max_sharpe cannot take a volatility cap, so without this the cap was
+        # silently dropped and we always returned the unconstrained max-Sharpe plan (often above the
+        # ceiling). If the cap is below this universe's minimum achievable volatility, no long-only
+        # mix can satisfy it — report INFEASIBLE (with that floor) so the caller can offer to widen
+        # the universe or hold off, rather than returning an over-ceiling plan that gets flagged
+        # downstream and tempts a fabricated allocation.
+        if max_volatility is not None:
+            min_achievable_vol = float(min_var_perf[1])
+            # Small tolerance so a cap numerically equal to the min-var floor still solves.
+            if max_volatility < min_achievable_vol - 1e-4:
+                return {
+                    "status": "infeasible",
+                    "message": (
+                        "No long-only allocation of the current assets can stay under the "
+                        f"{max_volatility:.1%} volatility ceiling — the lowest achievable "
+                        f"volatility for this universe is {min_achievable_vol:.1%}. "
+                        "Widen the universe with additional assets, or hold off."
+                    ),
+                    "max_volatility": max_volatility,
+                    "min_achievable_volatility": min_achievable_vol,
+                    "tickers": tickers,
+                }
+            ef_capped = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+            _apply_sector_constraints(ef_capped)
+            try:
+                ef_capped.efficient_risk(target_volatility=max_volatility)
+                capped_perf = ef_capped.portfolio_performance(verbose=False, risk_free_rate=0.0)
+                capped_weights_clean = ef_capped.clean_weights()
+            except Exception:
+                # Numerically unable to hit the cap from above even though it sits at/above the
+                # min-var floor (degenerate boundary): fall back to the min-variance plan, which is
+                # the lowest-vol point and therefore the safest mix that respects the ceiling.
+                ef_capped = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
+                _apply_sector_constraints(ef_capped)
+                ef_capped.min_volatility()
+                capped_perf = ef_capped.portfolio_performance(verbose=False, risk_free_rate=0.0)
+                capped_weights_clean = ef_capped.clean_weights()
+            return {
+                "status": "success",
+                "data": {
+                    "weights": capped_weights_clean,
+                    "expected_return": capped_perf[0],
+                    "risk": capped_perf[1],
+                    "sharpe_ratio": capped_perf[2],
+                    "min_variance_portfolio": {
+                        "weights": min_var_weights_clean,
+                        "expected_return": min_var_perf[0],
+                        "risk": min_var_perf[1],
+                    },
+                    "max_return_portfolio": {
+                        "weights": max_ret_weights_clean,
+                        "expected_return": max_ret_perf[0],
+                        "risk": max_ret_perf[1],
+                    },
+                },
+            }
+
+        # 3b. Max Sharpe ratio portfolio (no volatility cap)
         rf = 0.0
         ef_sharpe = EfficientFrontier(mean_returns, cov_matrix, weight_bounds=weight_bounds)
         _apply_sector_constraints(ef_sharpe)
@@ -282,7 +346,6 @@ def solve_problem(problem: PortfolioProblem) -> dict[str, Any]:
             sharpe_perf = ef_sharpe.portfolio_performance(verbose=False, risk_free_rate=0.0)
 
         # Clean weights
-        max_ret_weights_clean = ef_max_ret._make_output_weights(max_ret_weights)
         sharpe_weights_clean = ef_sharpe.clean_weights()
 
         return {

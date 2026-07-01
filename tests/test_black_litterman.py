@@ -88,5 +88,36 @@ def test_black_litterman() -> None:
     else:
         logger.error(f"Error: {result['message']}")
 
+def test_per_asset_bounds_pin_banded_asset() -> None:
+    """A per-asset [low, high] bound must confine that asset's weight to its box, overriding the
+    scalar (min_weight, max_weight) — this is how build_bl_inputs pins a view-less holding to a
+    drift band so max-Sharpe can't swing it on covariance alone. Offline: a caller-supplied PSD
+    covariance keeps the solve deterministic and network-free."""
+    tickers = ["A", "B", "C", "D"]
+    # Diagonal-dominant PSD covariance (annualised). C is the low-vol asset the optimiser would
+    # otherwise load as ballast; the band must stop it.
+    var = {"A": 0.04, "B": 0.05, "C": 0.0016, "D": 0.06}
+    cov = {r: {c: (var[r] if r == c else 0.002) for c in tickers} for r in tickers}
+    problem = BlackLittermanProblem(
+        description="per-asset bounds",
+        tickers=tickers,
+        views=[BlackLittermanView(asset="A", expected_return=0.08, confidence=0.6)],
+        market_cap_weights={t: 0.25 for t in tickers},
+        cov_matrix=cov,
+        min_weight=0.0,
+        max_weight=0.5,
+        # C is pinned to a tight band around its current 25%; the others stay free (0, 0.5).
+        per_asset_bounds={"C": [0.20, 0.30]},
+    )
+    result = solve_black_litterman_problem(problem)
+    assert result["status"] == "success", result.get("message")
+    w = result["data"]["weights"]
+    # C must respect its box (small tolerance for clean_weights rounding).
+    assert 0.20 - 1e-3 <= w["C"] <= 0.30 + 1e-3
+    # An unbanded asset may exceed C's ceiling — proving the band is per-asset, not global.
+    assert max(w["A"], w["B"], w["D"]) <= 0.5 + 1e-3
+
+
 if __name__ == "__main__":
-    test_black_litterman() 
+    test_black_litterman()
+    test_per_asset_bounds_pin_banded_asset()

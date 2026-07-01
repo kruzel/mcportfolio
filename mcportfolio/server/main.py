@@ -381,6 +381,7 @@ def solve_black_litterman_tool(
     min_weight: float = 0.0,
     max_weight: float = 1.0,
     cov_matrix: dict[str, dict[str, float]] | None = None,
+    per_asset_bounds: dict[str, list[float]] | None = None,
 ) -> list[TextContent]:
     """Solve a portfolio optimization problem using the Black-Litterman model.
 
@@ -399,6 +400,10 @@ def solve_black_litterman_tool(
         cov_matrix: Optional pre-assembled annualised covariance (row-major nested dict
             {row: {col: cov}}) covering every ticker. When provided the solver uses it
             instead of fetching live data. Normally supplied verbatim by build_bl_inputs.
+        per_asset_bounds: Optional per-asset {ticker: [low, high]} weight bounds overriding the
+            scalar (min_weight, max_weight) for the named tickers only. Used to pin a held asset
+            the customer expressed no view on to a narrow drift band around its current weight.
+            Normally supplied verbatim by build_bl_inputs.
 
     Returns:
         List of TextContent containing JSON with optimization results
@@ -418,6 +423,7 @@ def solve_black_litterman_tool(
             min_weight=min_weight,
             max_weight=max_weight,
             cov_matrix=cov_matrix,
+            per_asset_bounds=per_asset_bounds,
         )
 
         # Solve problem

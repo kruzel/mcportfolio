@@ -20,3 +20,13 @@ class BlackLittermanProblem(PortfolioProblem):
     market_cap_weights: dict[str, float] | None = Field(default=None, description="Market capitalization weights")
     min_weight: float | None = Field(default=0.0, description="Minimum weight for any asset")
     max_weight: float | None = Field(default=1.0, description="Maximum weight for any asset")
+    # Optional PER-ASSET weight bounds, overriding the scalar (min_weight, max_weight) for the
+    # named tickers only. Row-major ``{ticker: [low, high]}``. Used to pin a held asset the
+    # customer expressed NO view on to a narrow drift band around its current portfolio weight,
+    # so the max-Sharpe optimiser cannot swing it far on covariance grounds alone (e.g. loading a
+    # low-volatility holding as ballast the customer never asked to increase). Tickers absent from
+    # this dict fall back to the scalar bounds. The caller owns feasibility (bounds must leave the
+    # weights summing to 1).
+    per_asset_bounds: dict[str, list[float]] | None = Field(
+        default=None, description="Per-asset [low, high] weight bounds overriding the scalar bounds"
+    )

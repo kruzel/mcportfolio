@@ -167,8 +167,20 @@ def solve_black_litterman_problem(problem: BlackLittermanProblem) -> dict[str, A
             risk_free_rate=problem.risk_free_rate,
         )
 
-        # Set up optimization constraints
-        weight_bounds = (problem.min_weight, problem.max_weight)
+        # Set up optimization constraints. Default: a single scalar (min, max) applied to every
+        # asset. When the caller supplies per_asset_bounds, expand to a pypfopt "tuple list" — one
+        # (low, high) per asset, ORDERED to match the optimisation index (bl_returns.index, which is
+        # market_cap_weights' key order). Named tickers use their band; the rest fall back to the
+        # scalar bounds. This lets the caller pin a view-less held asset to a narrow drift band so
+        # max-Sharpe can't swing it on covariance alone.
+        if problem.per_asset_bounds:
+            scalar = (problem.min_weight, problem.max_weight)
+            weight_bounds = [
+                tuple(problem.per_asset_bounds.get(ticker, scalar))
+                for ticker in bl_returns.index
+            ]
+        else:
+            weight_bounds = (problem.min_weight, problem.max_weight)
 
         # Create efficient frontier with Black-Litterman returns
         from pypfopt import EfficientFrontier
